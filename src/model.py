@@ -36,7 +36,7 @@ class Database(nn.Module):
     def _embed(self, text: str):
         token_chunks = self.corpus_chunk_size - self.special_tokens
         tokens = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"]
-        token_list = tokens[:-(tokens.size(0) % token_chunks)].unbind()
+        token_list = tokens[:-(tokens.size(0) % token_chunks)].view(-1, token_chunks).unbind()
         if tokens.size(0) % token_chunks != 0:
             token_list.append(tokens[-(tokens.size(0) % token_chunks):])
         chunks = self.tokenizer.decode(token_list)
