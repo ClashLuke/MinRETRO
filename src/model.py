@@ -13,11 +13,11 @@ from torch.nn import functional as F
 @dataclasses.dataclass
 class TextInput:
     content: str
-    doc_id: int
+    doc_id: str
 
 
 class Database(nn.Module):
-    def __init__(self, model: SentenceTransformer, texts: typing.List[str], corpus_chunk_size: int = 128,
+    def __init__(self, model: SentenceTransformer, texts: typing.List[typing.Dict[str, str]], corpus_chunk_size: int = 128,
                  query_chunk_size: int = 64, topk: int = 1):
         super(Database, self).__init__()
         self.model = model
@@ -28,24 +28,25 @@ class Database(nn.Module):
         self.tokenizer: transformers.BertTokenizer = model.tokenizer
         self.special_tokens = len(self.tokenizer("A")["input_ids"]) - 1
 
-        embeddings, self.texts = zip(*[self._embed(txt) for txt in texts])
+        embeddings, self.texts, ids = zip(*[self._embed(txt["src"]) + (txt["id"],) for txt in texts])
+        self.ids = {doc_id: list_index for list_index, doc_id in enumerate(ids)}
         self.lengths = np.array([embd.size(0) for embd in embeddings])
         self.cumulative_lengths = np.cumsum(self.lengths, 0)
         self.register_buffer("embeddings", torch.cat(embeddings, 0).transpose(1, 0))
 
-    def _embed(self, text: str):
-        token_chunks = self.corpus_chunk_size - self.special_tokens
+    def _embed(self, text: str, skip: int):
+        token_chunks = self.query_chunk_size - self.special_tokens + skip
         tokens = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"]
-        token_list = tokens[:-(tokens.size(0) % token_chunks)].view(-1, token_chunks).unbind()
+        token_list = tokens[:-(tokens.size(0) % token_chunks)].view(-1, token_chunks)[:, :-skip].unbind()
         if tokens.size(0) % token_chunks != 0:
-            token_list.append(tokens[-(tokens.size(0) % token_chunks):])
+            token_list.append(tokens[-(tokens.size(0) % (token_chunks - skip)):])
         chunks = self.tokenizer.decode(token_list)
         tokens = self.tokenizer(chunks, return_tensors="pt", add_special_tokens=True, max_length=self.corpus_chunk_size,
                                 padding=True)
         return F.normalize(self.model(tokens)["sentence_features"], 1), chunks
 
     def forward(self, inp: TextInput) -> typing.List[typing.List[str]]:
-        query, doc_id = inp.content, inp.doc_id
+        query, doc_id = inp.content, self.ids.get(inp.doc_id)
         start = self.cumulative_lengths[doc_id]
         if doc_id == 0:
             embeddings = self.embeddings[:, start:]
@@ -54,8 +55,10 @@ class Database(nn.Module):
         elif 0 < doc_id < self.embeddings.size(1) - 1:  # can't concat zero-sized tensor, so have to guard case with ifs
             end = self.cumulative_lengths[doc_id + 1]
             embeddings = torch.cat([self.embeddings[:, :start], self.embeddings[:, end:]], 1)
-        else:
+        elif doc_id is None:
             embeddings = self.embeddings  # if doc_id is outside the known range, it's not an issue
+        else:
+            raise ValueError(f"Unknown {doc_id=}")
 
         cos_sim = self._embed(query)[0] @ embeddings  # paper uses l2-distance, but expensive in torch
         values, indices = torch.topk(cos_sim, self.topk, 1)
@@ -66,8 +69,10 @@ class Database(nn.Module):
             pass
         elif 0 < doc_id < self.embeddings.size(1) - 1:  # can't concat zero-sized tensor, so have to guard case with ifs
             indices += torch.where(indices >= start, end - start, 0)
-        else:
+        elif doc_id is None:
             pass  # if doc_id is outside the known range, it's not an issue
+        else:
+            raise ValueError(f"Unknown {doc_id=}")
 
         return [[self.texts[i] for i in qry] for qry in indices.cpu().tolist()]
 
@@ -246,8 +251,9 @@ class Decoder(nn.Module):
 
 class Retro(pl.LightningModule):
     def __init__(self, embedding_model: SentenceTransformer, encoder: Encoder, decoder: Decoder,
-                 tokenizer: transformers.BertTokenizer, texts: typing.List[str], corpus_chunk_size: int = 128,
-                 query_chunk_size: int = 64, topk: int = 1, learning_rate: float = 1e-4, weight_decay=0.1):
+                 tokenizer: transformers.BertTokenizer, texts: typing.List[typing.Dict[str, str]],
+                 corpus_chunk_size: int = 128, query_chunk_size: int = 64, topk: int = 1, learning_rate: float = 1e-4,
+                 weight_decay=0.1):
         super(Retro, self).__init__()
         self.topk = topk
         self.corpus_chunk_size = corpus_chunk_size

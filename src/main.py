@@ -9,7 +9,7 @@ from sentence_transformers import SentenceTransformer
 from smart_open import smart_open
 from torch.utils import data
 
-from model import Decoder, Encoder, Retro
+from model import Decoder, Encoder, Retro, TextInput
 
 
 class Dataset(data.Dataset):
@@ -28,7 +28,9 @@ class Dataset(data.Dataset):
         start = self.random.randint(0, tokens.size(0) - self.sequence_length - 1)
         src = tokens[start: start + self.sequence_length]
         tgt = tokens[start + 1: start + self.sequence_length + 1]
-        return src, tgt
+        src = self.tokenizer.decode(src)
+        tgt = self.tokenizer.decode(tgt)
+        return TextInput(content=src, doc_id=self.data[item]["doc_id"]), tgt
 
     def __len__(self):
         return len(self.data)
@@ -64,9 +66,9 @@ def main(embedding_model_name: str = "bert-large-uncased", tokenizer: str = "gpt
     so learning_rate=1e-4 + weight_decay=0.1 would remove 1e-5 or 0.01% of the parameter at every step.
     :param batch_size: Number of samples seen per training step
     :param sequence_length: Number of tokens per training sequence
-    :param train_dataset_path: Path to json file containing training examples like {"src": <text>}
-    :param dataset_path: Path to jsonl file containing training examples like {"src": <text>} (can be the same as
-    train_dataset_path)
+    :param train_dataset_path: Path to json file containing training examples like {"src": <text>, "id": <text>}
+    :param dataset_path: Path to jsonl file containing training examples like {"src": <text>, "id": <text>} (can be the
+    same as train_dataset_path)
     """
     tokenizer: transformers.BertTokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer)
     embedding_model = SentenceTransformer(embedding_model_name)
@@ -77,7 +79,7 @@ def main(embedding_model_name: str = "bert-large-uncased", tokenizer: str = "gpt
     decoder = Decoder(decoder_features, decoder_heads, decoder_depth, tokenizer.vocab_size, sequence_length, retro_at,
                       query_chunk_size, dropout_rate)
 
-    retrieval_dataset = []  # [{"src": <text>}, ...]
+    retrieval_dataset = []  # [{"src": <text>, "id": <text>}, ...]
     with smart_open(dataset_path, mode='r') as f:
         for line in f:
             retrieval_dataset.append(json.loads(line))
@@ -85,7 +87,7 @@ def main(embedding_model_name: str = "bert-large-uncased", tokenizer: str = "gpt
     retro = Retro(embedding_model, encoder, decoder, tokenizer, retrieval_dataset, corpus_chunk_size, query_chunk_size,
                   topk, learning_rate, weight_decay)
 
-    train_dataset = []  # [{"src": <text>}, ...]
+    train_dataset = []  # [{"src": <text>, "id": <text>}, ...]
     with smart_open(train_dataset_path, mode='r') as f:
         for line in f:
             train_dataset.append(json.loads(line))
