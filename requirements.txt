@@ -3,3 +3,5 @@ pytorch-lightning
 torch
 transformers
 numpy
+smart-open
+typer

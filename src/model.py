@@ -149,22 +149,24 @@ class ChunkedCrossAttention(CrossAttention):
 
 
 class FeedForward(nn.Module):  # Not clarified in paper
-    def __init__(self, features: int, expansion: int):
+    def __init__(self, features: int, expansion: int, dropout_rate: float):
         super(FeedForward, self).__init__()
         self.to_intermediate = nn.Linear(features, features * expansion)
         self.activation = nn.GELU()
         self.normalization = RMSNorm(features * expansion)
+        self.dropout = nn.Dropout(dropout_rate)
         self.from_intermediate = nn.Linear(features * expansion, features)
 
     def forward(self, x: torch.Tensor):
         x = self.to_intermediate(x)
         x = self.activation(x)
         x = self.normalization(x)
+        x = self.dropout(x)
         return self.from_intermediate(x)
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, features: int, heads: int, retrieves: bool, query_chunk_size: int):
+    def __init__(self, features: int, heads: int, retrieves: bool, query_chunk_size: int, dropout_rate: float):
         super(DecoderBlock, self).__init__()
         self.attn = SandwichNorm(features, SelfAttention(features, masked=True, heads=heads))
         if retrieves:
@@ -172,7 +174,7 @@ class DecoderBlock(nn.Module):
             self.cca = SandwichNorm(features, cca)
         else:
             self.cca = None
-        self.ffw = SandwichNorm(features, FeedForward(features, 4))  # 4 not mentioned in paper but typical
+        self.ffw = SandwichNorm(features, FeedForward(features, 4, dropout_rate))
 
     def forward(self, inputs: typing.Tuple[torch.Tensor, torch.Tensor]):
         inp, neighbors = inputs
@@ -190,7 +192,7 @@ class EncoderBlock(nn.Module):
     def __init__(self, features: int, heads: int):
         super(EncoderBlock, self).__init__()
         self.attn = SandwichNorm(features, SelfAttention(features, masked=False, heads=heads))
-        self.ffw = SandwichNorm(features, FeedForward(features, 4))  # 4 not mentioned in paper but typical
+        self.ffw = SandwichNorm(features, FeedForward(features, 4))
 
     def forward(self, inp: torch.Tensor):
         inp = inp + self.attn(inp)
@@ -212,8 +214,8 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, features: int, vocab: int, heads: int, depth: int, retro_at: typing.List[int],
-                 query_chunk_size: int):
+    def __init__(self, features: int, heads: int, depth: int, vocab: int, retro_at: typing.List[int],
+                 query_chunk_size: int, dropout_rate: float):
         super(Decoder, self).__init__()
         self.input_embedding = nn.Embedding(vocab, features)
         self.core = nn.Sequential(*[DecoderBlock(features, heads, i in retro_at, query_chunk_size)
@@ -229,7 +231,7 @@ class Decoder(nn.Module):
 class Retro(pl.LightningModule):
     def __init__(self, embedding_model: SentenceTransformer, encoder: Encoder, decoder: Decoder,
                  tokenizer: transformers.BertTokenizer, texts: typing.List[str], corpus_chunk_size: int = 128,
-                 query_chunk_size: int = 64, topk: int = 1):
+                 query_chunk_size: int = 64, topk: int = 1, learning_rate: float = 1e-4, weight_decay=0.1):
         super(Retro, self).__init__()
         self.topk = topk
         self.corpus_chunk_size = corpus_chunk_size
@@ -237,6 +239,8 @@ class Retro(pl.LightningModule):
         self.tokenizer = tokenizer
         self.encoder = encoder
         self.decoder = decoder
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
 
     def forward(self, inp: typing.List[TextInput]):
         neighbors = []
@@ -267,3 +271,11 @@ class Retro(pl.LightningModule):
             tokens = distribution.sample([len(src)])
             for s, t in zip(src, tokens):
                 s.content += self.tokenizer.decode(self.tokenizer.encode(s.content) + [t])
+
+    def configure_optimizers(self):
+        no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
+        decay_opt = torch.optim.AdamW([p for n, p in self.named_parameters() if n not in no_decay],
+                                      weight_decay=self.weight_decay, lr=self.learning_rate, betas=(0.9, 0.95))
+        no_decay_opt = torch.optim.AdamW([p for n, p in self.named_parameters() if n in no_decay], weight_decay=0,
+                                         lr=self.learning_rate, betas=(0.9, 0.95))
+        return decay_opt, no_decay_opt
