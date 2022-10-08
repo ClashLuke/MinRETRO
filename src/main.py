@@ -71,7 +71,7 @@ def main(embedding_model_name: str = "bert-large-uncased", tokenizer: str = "gpt
     tokenizer: transformers.BertTokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer)
     embedding_model = SentenceTransformer(embedding_model_name)
 
-    encoder = Encoder(encoder_features, encoder_heads, encoder_depth, tokenizer.vocab_size, sequence_length)
+    encoder = Encoder(encoder_features, encoder_heads, encoder_depth, tokenizer.vocab_size, sequence_length, 0)
     retro_at = [i for i in range(1, decoder_depth + 1)
                 if (i - first_retrieve_at_depth) % retrieval_frequency == 0 and i >= first_retrieve_at_depth]
     decoder = Decoder(decoder_features, decoder_heads, decoder_depth, tokenizer.vocab_size, sequence_length, retro_at,

@@ -189,10 +189,10 @@ class EncoderBlock(nn.Module):
     Not specified in the paper. Assuming a typical transformer encoder.
     """
 
-    def __init__(self, features: int, heads: int):
+    def __init__(self, features: int, heads: int, dropout_rate: float):
         super(EncoderBlock, self).__init__()
         self.attn = SandwichNorm(features, SelfAttention(features, masked=False, heads=heads))
-        self.ffw = SandwichNorm(features, FeedForward(features, 4))
+        self.ffw = SandwichNorm(features, FeedForward(features, 4, dropout_rate))
 
     def forward(self, inp: torch.Tensor):
         inp = inp + self.attn(inp)
@@ -220,10 +220,10 @@ class Encoder(nn.Module):
     Not specified in the paper. Assuming a typical transformer encoder.
     """
 
-    def __init__(self, features: int, heads: int, depth: int, vocab: int, sequence_length: int):
+    def __init__(self, features: int, heads: int, depth: int, vocab: int, sequence_length: int, dropout_rate: float):
         super(Encoder, self).__init__()
         self.embedding = Embedding(vocab, features, sequence_length)
-        self.core = nn.Sequential(*[EncoderBlock(features, heads) for _ in range(depth)])
+        self.core = nn.Sequential(*[EncoderBlock(features, heads, dropout_rate) for _ in range(depth)])
 
     def forward(self, input_ids: torch.Tensor):
         return self.core(self.embedding(input_ids))
