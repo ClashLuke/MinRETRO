@@ -199,31 +199,47 @@ class EncoderBlock(nn.Module):
         return inp + self.ffw(inp)
 
 
+class Embedding(nn.Module):
+    """
+    Combined position- and token-embedding
+    RETRO uses relative position embeddings, but didn't specify which kind. As absolute position embeddings
+    outperform relative position embeddings, they're used here.
+    """
+
+    def __init__(self, vocab: int, features: int, sequence_length: int):
+        super(Embedding, self).__init__()
+        self.input_embedding = nn.Embedding(vocab, features)
+        self.position_embedding = nn.Parameter(torch.randn(sequence_length, features) / features ** 0.5)
+
+    def forward(self, input_ids: torch.Tensor):
+        return self.input_embedding(input_ids) + self.position_embedding[:input_ids.size(1)]
+
+
 class Encoder(nn.Module):
     """
     Not specified in the paper. Assuming a typical transformer encoder.
     """
 
-    def __init__(self, features: int, heads: int, depth: int, vocab: int):
+    def __init__(self, features: int, heads: int, depth: int, vocab: int, sequence_length: int):
         super(Encoder, self).__init__()
-        self.input_embedding = nn.Embedding(vocab, features)
+        self.embedding = Embedding(vocab, features, sequence_length)
         self.core = nn.Sequential(*[EncoderBlock(features, heads) for _ in range(depth)])
 
     def forward(self, input_ids: torch.Tensor):
-        return self.core(self.input_embedding(input_ids))
+        return self.core(self.embedding(input_ids))
 
 
 class Decoder(nn.Module):
-    def __init__(self, features: int, heads: int, depth: int, vocab: int, retro_at: typing.List[int],
-                 query_chunk_size: int, dropout_rate: float):
+    def __init__(self, features: int, heads: int, depth: int, vocab: int, sequence_length: int,
+                 retro_at: typing.List[int], query_chunk_size: int, dropout_rate: float):
         super(Decoder, self).__init__()
-        self.input_embedding = nn.Embedding(vocab, features)
-        self.core = nn.Sequential(*[DecoderBlock(features, heads, i in retro_at, query_chunk_size)
+        self.embedding = Embedding(vocab, features, sequence_length)
+        self.core = nn.Sequential(*[DecoderBlock(features, heads, i in retro_at, query_chunk_size, dropout_rate)
                                     for i in range(depth)])
         self.output = nn.Linear(features, vocab)
 
     def forward(self, input_ids: torch.Tensor, neighbor_embeddings: torch.Tensor):
-        inp = self.input_embedding(input_ids)
+        inp = self.embedding(input_ids)
         inp, _unmodified_neighbor_embeddings = self.core((inp, neighbor_embeddings))
         return self.output(inp)
 
