@@ -50,7 +50,7 @@ class Database(nn.Module):
         if doc_id == 0:
             embeddings = self.embeddings[:, start:]
         elif doc_id == self.embeddings.size(1) - 1:
-            embeddings = self.embeddings[:start]
+            embeddings = self.embeddings[:, :start]
         elif 0 < doc_id < self.embeddings.size(1) - 1:  # can't concat zero-sized tensor, so have to guard case with ifs
             end = self.cumulative_lengths[doc_id + 1]
             embeddings = torch.cat([self.embeddings[:, :start], self.embeddings[:, end:]], 1)
