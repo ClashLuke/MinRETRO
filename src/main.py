@@ -96,3 +96,7 @@ def main(embedding_model_name: str = "bert-large-uncased", tokenizer: str = "gpt
 
     trainer = pytorch_lightning.Trainer()
     trainer.fit(retro, train_dataloader)
+
+
+if __name__== "__main__":
+    typer.run(main)
