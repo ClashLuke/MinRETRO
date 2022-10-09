@@ -28,7 +28,8 @@ class Database(nn.Module):
         self.tokenizer: transformers.BertTokenizer = model.tokenizer
         self.special_tokens = len(self.tokenizer("A")["input_ids"]) - 1
 
-        embeddings, self.texts, ids = zip(*[self._embed(txt["src"]) + (txt["id"],) for txt in texts])
+        embeddings, self.texts, ids = zip(*[self._embed(txt["src"], corpus_chunk_size - query_chunk_size) + (txt["id"],)
+                                            for txt in texts])
         self.ids = {doc_id: list_index for list_index, doc_id in enumerate(ids)}
         self.lengths = np.array([embd.size(0) for embd in embeddings])
         self.cumulative_lengths = np.cumsum(self.lengths, 0)
@@ -60,7 +61,7 @@ class Database(nn.Module):
         else:
             raise ValueError(f"Unknown {doc_id=}")
 
-        cos_sim = self._embed(query)[0] @ embeddings  # paper uses l2-distance, but expensive in torch
+        cos_sim = self._embed(query, 0)[0] @ embeddings  # paper uses l2-distance, but expensive in torch
         values, indices = torch.topk(cos_sim, self.topk, 1)
 
         if doc_id == 0:
