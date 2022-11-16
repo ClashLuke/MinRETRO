@@ -9,34 +9,44 @@ from sentence_transformers import SentenceTransformer
 from smart_open import smart_open
 from torch.utils import data
 
-from model import Decoder, Encoder, Retro, TextInput
+from model import Decoder, Encoder, Retro
+
+
+class NoSamplesError(ValueError):
+    pass
 
 
 class Dataset(data.Dataset):
     def __init__(self, data: typing.List[typing.Dict[str, str]], sequence_length: int,
-                 tokenizer: transformers.BertTokenizer):
+                 tokenizer: transformers.BertTokenizer, retries: int = 4):
         self.data = data
         self.sequence_length = sequence_length
         self.tokenizer = tokenizer
         self.random = random.Random(0)
+        self.retries = retries
 
     def __getitem__(self, item):
-        text = self.data[item]["src"]
-        tokens = self.tokenizer(text, return_tensors="pt")["input_ids"]
-        if tokens.size(0) < self.sequence_length + 1:
-            return self[self.random.randint(0, len(self) - 1)]
+        retries = self.retries
+        while retries != -1:
+            item = self.random.randint(0, len(self) - 1)
+            text = self.data[item]["src"]
+            tokens = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
+            if tokens.size(0) > self.sequence_length:
+                break
+            retries -= 1
+        if retries == -1:
+            raise NoSamplesError(f"Couldn't find a sample longer than {self.sequence_length=} after {self.retries + 1} "
+                                 f"attempts. Last text had {tokens.size(0)} tokens.")
         start = self.random.randint(0, tokens.size(0) - self.sequence_length - 1)
         src = tokens[start: start + self.sequence_length]
         tgt = tokens[start + 1: start + self.sequence_length + 1]
-        src = self.tokenizer.decode(src)
-        tgt = self.tokenizer.decode(tgt)
-        return TextInput(content=src, doc_id=self.data[item]["doc_id"]), tgt
+        return {"content": src, "doc_id": self.data[item]["id"]}, tgt
 
     def __len__(self):
         return len(self.data)
 
 
-def main(embedding_model_name: str = "bert-large-uncased", tokenizer: str = "gpt2",
+def main(embedding_model_name: str = "bert-large-uncased",
          encoder_features: int = 896, encoder_depth: int = 6, encoder_heads: int = 16,
          decoder_features: int = 896, decoder_depth: int = 12, decoder_heads: int = 16,
          retrieval_frequency: int = 3, first_retrieve_at_depth: int = 6,
@@ -48,7 +58,6 @@ def main(embedding_model_name: str = "bert-large-uncased", tokenizer: str = "gpt
     """
     See https://arxiv.org/pdf/2112.04426.pdf#subsection.C.1 for official configurations
     :param embedding_model_name: Name of model (on HuggingFace Hub) to use for embeddings
-    :param tokenizer: Either path to local HuggingFace tokenizer or name of tokenizer from the HuggingFace Hub
     :param encoder_features: Width of the encoder's residual path
     :param encoder_depth: Number of blocks (FeedForward + Attention = 1 Block) in encoder
     :param encoder_heads: Number of attention heads used during encoder attention
@@ -70,10 +79,10 @@ def main(embedding_model_name: str = "bert-large-uncased", tokenizer: str = "gpt
     :param dataset_path: Path to jsonl file containing training examples like {"src": <text>, "id": <text>} (can be the
     same as train_dataset_path)
     """
-    tokenizer: transformers.BertTokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer)
     embedding_model = SentenceTransformer(embedding_model_name)
+    tokenizer: transformers.BertTokenizer = embedding_model.tokenizer
 
-    encoder = Encoder(encoder_features, encoder_heads, encoder_depth, tokenizer.vocab_size, sequence_length, 0)
+    encoder = Encoder(encoder_features, encoder_heads, encoder_depth, tokenizer.vocab_size, query_chunk_size * topk, 0)
     retro_at = [i for i in range(1, decoder_depth + 1)
                 if (i - first_retrieve_at_depth) % retrieval_frequency == 0 and i >= first_retrieve_at_depth]
     decoder = Decoder(decoder_features, decoder_heads, decoder_depth, tokenizer.vocab_size, sequence_length, retro_at,
@@ -98,5 +107,5 @@ def main(embedding_model_name: str = "bert-large-uncased", tokenizer: str = "gpt
     trainer.fit(retro, train_dataloader)
 
 
-if __name__== "__main__":
+if __name__ == '__main__':
     typer.run(main)

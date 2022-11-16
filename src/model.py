@@ -11,13 +11,14 @@ from torch.nn import functional as F
 
 
 @dataclasses.dataclass
-class TextInput:
-    content: str
+class TokenInput:
+    content: torch.Tensor
     doc_id: str
 
 
 class Database(nn.Module):
-    def __init__(self, model: SentenceTransformer, texts: typing.List[typing.Dict[str, str]], corpus_chunk_size: int = 128,
+    def __init__(self, model: SentenceTransformer, texts: typing.List[typing.Dict[str, str]],
+                 corpus_chunk_size: int = 128,
                  query_chunk_size: int = 64, topk: int = 1):
         super(Database, self).__init__()
         self.model = model
@@ -28,54 +29,70 @@ class Database(nn.Module):
         self.tokenizer: transformers.BertTokenizer = model.tokenizer
         self.special_tokens = len(self.tokenizer("A")["input_ids"]) - 1
 
-        embeddings, self.texts, ids = zip(*[self._embed(txt["src"], corpus_chunk_size - query_chunk_size) + (txt["id"],)
-                                            for txt in texts])
+        out = zip(*[self._embed(txt["src"], corpus_chunk_size - query_chunk_size) + (txt["id"],) for txt in texts])
+        embeddings, chunks, ids = out
+        self.chunks = [t for doc in chunks for t in doc]
         self.ids = {doc_id: list_index for list_index, doc_id in enumerate(ids)}
         self.lengths = np.array([embd.size(0) for embd in embeddings])
         self.cumulative_lengths = np.cumsum(self.lengths, 0)
         self.register_buffer("embeddings", torch.cat(embeddings, 0).transpose(1, 0))
 
-    def _embed(self, text: str, skip: int):
-        token_chunks = self.query_chunk_size - self.special_tokens + skip
-        tokens = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"]
-        token_list = tokens[:-(tokens.size(0) % token_chunks)].view(-1, token_chunks)[:, :-skip].unbind()
-        if tokens.size(0) % token_chunks != 0:
-            token_list.append(tokens[-(tokens.size(0) % (token_chunks - skip)):])
-        chunks = self.tokenizer.decode(token_list)
-        tokens = self.tokenizer(chunks, return_tensors="pt", add_special_tokens=True, max_length=self.corpus_chunk_size,
-                                padding=True)
-        return F.normalize(self.model(tokens)["sentence_features"], 1), chunks
+    def _batch(self, tokens: torch.Tensor, keep: int):
+        offset = tokens.size(0) % self.query_chunk_size
+        chunks = tokens[:tokens.size(0) - offset].view(-1, self.query_chunk_size)[:, :keep]
+        if offset > keep:
+            residual = tokens[tokens.size(0) - offset:][:keep]
+            if keep > residual.size(0):
+                if self.tokenizer.pad_token_id is not None:
+                    token = self.tokenizer.pad_token_id
+                elif self.tokenizer.eos_token_id is not None:
+                    token = self.tokenizer.eos_token_id
+                else:
+                    token = 0
+                pad = torch.full([keep - residual.size(0)], token, dtype=residual.dtype, device=residual.device)
+                residual = torch.cat([residual, pad], 0)
+            chunks = torch.cat([chunks, residual.reshape(1, -1)], 0)
+        return chunks
 
-    def forward(self, inp: TextInput) -> typing.List[typing.List[str]]:
+    def _embed(self, text: str, skip: int):
+        tokens = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
+        chunks = self._batch(tokens, skip)
+        return self.embed(chunks), chunks
+
+    def embed(self, tokens: torch.Tensor):
+        inp = {"input_ids": tokens, "attention_mask": torch.ones_like(tokens)}
+        return F.normalize(self.model(inp)["sentence_embedding"], 1)
+
+    def forward(self, inp: TokenInput) -> typing.List[typing.List[str]]:
         query, doc_id = inp.content, self.ids.get(inp.doc_id)
         start = self.cumulative_lengths[doc_id]
-        if doc_id == 0:
+        if doc_id is None:
+            embeddings = self.embeddings  # if doc_id is outside the known range, it's not an issue
+        elif doc_id == 0:
             embeddings = self.embeddings[:, start:]
         elif doc_id == self.embeddings.size(1) - 1:
             embeddings = self.embeddings[:, :start]
         elif 0 < doc_id < self.embeddings.size(1) - 1:  # can't concat zero-sized tensor, so have to guard case with ifs
             end = self.cumulative_lengths[doc_id + 1]
             embeddings = torch.cat([self.embeddings[:, :start], self.embeddings[:, end:]], 1)
-        elif doc_id is None:
-            embeddings = self.embeddings  # if doc_id is outside the known range, it's not an issue
         else:
             raise ValueError(f"Unknown {doc_id=}")
 
-        cos_sim = self._embed(query, 0)[0] @ embeddings  # paper uses l2-distance, but expensive in torch
-        values, indices = torch.topk(cos_sim, self.topk, 1)
+        similarity = self.embed(self._batch(query, self.query_chunk_size)) @ embeddings
+        # paper uses l2-distance, but expensive in torch
 
-        if doc_id == 0:
+        values, indices = torch.topk(similarity, self.topk, 1)
+        if doc_id is None:
+            pass
+        elif doc_id == 0:
             indices += start
         elif doc_id == self.embeddings.size(1) - 1:
             pass
         elif 0 < doc_id < self.embeddings.size(1) - 1:  # can't concat zero-sized tensor, so have to guard case with ifs
             indices += torch.where(indices >= start, end - start, 0)
-        elif doc_id is None:
-            pass  # if doc_id is outside the known range, it's not an issue
         else:
             raise ValueError(f"Unknown {doc_id=}")
-
-        return [[self.texts[i] for i in qry] for qry in indices.cpu().tolist()]
+        return [[self.chunks[i] for i in qry] for qry in indices.cpu().tolist()]
 
 
 class RMSNorm(nn.Module):
@@ -104,8 +121,8 @@ class SandwichNorm(nn.Module):
         self.core = module
         self.out_norm = RMSNorm(features)
 
-    def forward(self, inp: torch.Tensor):
-        return self.out_norm(self.core(self.in_norm(inp)))
+    def forward(self, inp: torch.Tensor, *other: torch.Tensor):
+        return self.out_norm(self.core(self.in_norm(inp), *other))
 
 
 class CrossAttention(nn.Module):
@@ -122,8 +139,8 @@ class CrossAttention(nn.Module):
         batch, sequence, features = attend_from.size()
         qry = self.to_q(attend_from).view(batch, sequence, self.heads, self.features_per_head)
         key, val = self.to_kv(attend_to).chunk(2, -1)
-        key = key.view(batch, -1, self.heads, self.features_per_head)
-        val = val.view(batch, -1, self.heads, self.features_per_head)
+        key = key.view(batch, sequence, self.heads, self.features_per_head)
+        val = val.view(batch, sequence, self.heads, self.features_per_head)
 
         logits = torch.einsum("bshf,bzhf->bhsz", qry, key)
         if self.masked:
@@ -148,8 +165,8 @@ class ChunkedCrossAttention(CrossAttention):
 
     def forward(self, attend_from: torch.Tensor, attend_to: torch.Tensor):
         batch, sequence, features = attend_from.size()
-        attend_from = attend_from[:, self.query_chunk_size - 1:-1].reshape(-1, self.query_chunk_size, features)
-        out = super(ChunkedCrossAttention, self).forward(attend_from, attend_to)
+        src = attend_from[:, self.query_chunk_size - 1:-1].reshape(-1, self.query_chunk_size, features)
+        out = super(ChunkedCrossAttention, self).forward(src, attend_to)
         out = out.view(batch, -1, features)
         return torch.cat([attend_from[:, :self.query_chunk_size - 1], out, attend_from[:, -1:]], 1)
 
@@ -218,7 +235,7 @@ class Embedding(nn.Module):
         self.position_embedding = nn.Parameter(torch.randn(sequence_length, features) / features ** 0.5)
 
     def forward(self, input_ids: torch.Tensor):
-        return self.input_embedding(input_ids) + self.position_embedding[:input_ids.size(1)]
+        return self.input_embedding(input_ids) + self.position_embedding[None, :input_ids.size(1)]
 
 
 class Encoder(nn.Module):
@@ -256,38 +273,32 @@ class Retro(pl.LightningModule):
                  corpus_chunk_size: int = 128, query_chunk_size: int = 64, topk: int = 1, learning_rate: float = 1e-4,
                  weight_decay=0.1):
         super(Retro, self).__init__()
-        self.topk = topk
         self.corpus_chunk_size = corpus_chunk_size
+
         self.database = Database(embedding_model, texts, corpus_chunk_size, query_chunk_size, topk)
-        self.tokenizer = tokenizer
         self.encoder = encoder
         self.decoder = decoder
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
 
-    def forward(self, inp: typing.List[TextInput]):
-        neighbors = []
-        for i in inp:
-            retrieved = self.database(i)
-            tokens = []
-            for r in retrieved:
-                ret = self.tokenizer(r, return_tensors="pt", max_length=self.corpus_chunk_size, padding=True)
-                tokens.append(torch.stack(ret["input_ids"], 0))
-            neighbors.append(torch.stack(tokens, 0))
-        neighbors = torch.stack(neighbors, 0)  # [Batch, QueryChunks, TopK, CorpusChunkSize]
-        neighbors = neighbors.view(-1, self.topk * self.corpus_chunk_size)
-
+    def forward(self, inp: typing.Dict[str, typing.Union[typing.List[torch.Tensor], typing.List[int]]]):
+        inp = TokenInput(**inp)
+        retrieved = [[self.database(TokenInput(content=i, doc_id=d))] for i, d in zip(inp.content, inp.doc_id)]
+        retrieved = torch.stack([torch.stack([torch.stack([torch.stack(a) for a in b]) for b in c]) for c in retrieved])
+        retrieved = retrieved.reshape(len(inp.doc_id), -1, self.database.topk, retrieved.size(-1))
+        retrieved = retrieved[:, :-1]  # [Batch, Chunks, TopK, Tokens] -> [Batch, Chunks - 1, TopK, Tokens]
+        # [Batch, Chunks - 1, TopK, Tokens]  -> [Batch * (Chunks - 1), TopK * Tokens]
+        neighbors = retrieved.reshape(-1, self.database.topk * retrieved.size(-1))
         neighbor_embeddings = self.encoder(neighbors)
+        return self.decoder(inp.content, neighbor_embeddings)
 
-        input_ids = self.tokenizer([i.content for i in inp], return_tensors="pt")["input_ids"]
-        return self.decoder(input_ids, neighbor_embeddings)
-
-    def training_step(self, src: typing.List[TextInput], tgt: typing.List[str]) -> torch.Tensor:
+    def training_step(self, inp: typing.Tuple[typing.Dict[str, typing.Union[typing.List[str], typing.List[int]]],
+                                              typing.List[str]]) -> torch.Tensor:
+        src, target_ids = inp
         logits = self.forward(src)
-        target_ids = self.tokenizer(tgt, return_tensors="pt")["input_ids"]
-        return F.cross_entropy(logits, target_ids)
+        return F.cross_entropy(logits.transpose(1, 2), target_ids)
 
-    def generate(self, src: typing.List[TextInput], tokens: int):
+    def generate(self, src: typing.List[TokenInput], tokens: int):
         for _ in range(tokens):
             logits = self.forward(src)
             distribution = torch.distributions.Categorical(logits)
@@ -297,8 +308,15 @@ class Retro(pl.LightningModule):
 
     def configure_optimizers(self):
         no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
-        decay_opt = torch.optim.AdamW([p for n, p in self.named_parameters() if n not in no_decay],
-                                      weight_decay=self.weight_decay, lr=self.learning_rate, betas=(0.9, 0.95))
-        no_decay_opt = torch.optim.AdamW([p for n, p in self.named_parameters() if n in no_decay], weight_decay=0,
-                                         lr=self.learning_rate, betas=(0.9, 0.95))
-        return decay_opt, no_decay_opt
+        opt = torch.optim.AdamW([
+                {
+                        "params": [p for n, p in self.named_parameters() if not any(nd in n for nd in no_decay)],
+                        "weight_decay": self.weight_decay,
+                        },
+                {
+                        "params": [p for n, p in self.named_parameters() if any(nd in n for nd in no_decay)],
+                        "weight_decay": 0,
+                        },
+                ],
+                weight_decay=0, lr=self.learning_rate, betas=(0.9, 0.95))
+        return opt
