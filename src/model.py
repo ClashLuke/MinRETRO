@@ -70,9 +70,9 @@ class Database(nn.Module):
             embeddings = self.embeddings  # if doc_id is outside the known range, it's not an issue
         elif doc_id == 0:
             embeddings = self.embeddings[:, start:]
-        elif doc_id == self.embeddings.size(1) - 1:
+        elif doc_id == self.lengths.shape[0] - 1:
             embeddings = self.embeddings[:, :start]
-        elif 0 < doc_id < self.embeddings.size(1) - 1:  # can't concat zero-sized tensor, so have to guard case with ifs
+        elif 0 < doc_id < self.lengths.shape[0] - 1:  # can't concat zero-sized tensor, so have to guard case with ifs
             end = self.cumulative_lengths[doc_id + 1]
             embeddings = torch.cat([self.embeddings[:, :start], self.embeddings[:, end:]], 1)
         else:
@@ -86,9 +86,9 @@ class Database(nn.Module):
             pass
         elif doc_id == 0:
             indices += start
-        elif doc_id == self.embeddings.size(1) - 1:
+        elif doc_id == self.lengths.shape[0] - 1:
             pass
-        elif 0 < doc_id < self.embeddings.size(1) - 1:  # can't concat zero-sized tensor, so have to guard case with ifs
+        elif 0 < doc_id < self.lengths.shape[0] - 1:  # can't concat zero-sized tensor, so have to guard case with ifs
             indices += torch.where(indices >= start, end - start, 0)
         else:
             raise ValueError(f"Unknown {doc_id=}")
@@ -139,8 +139,8 @@ class CrossAttention(nn.Module):
         batch, sequence, features = attend_from.size()
         qry = self.to_q(attend_from).view(batch, sequence, self.heads, self.features_per_head)
         key, val = self.to_kv(attend_to).chunk(2, -1)
-        key = key.view(batch, sequence, self.heads, self.features_per_head)
-        val = val.view(batch, sequence, self.heads, self.features_per_head)
+        key = key.view(batch, -1, self.heads, self.features_per_head)
+        val = val.view(batch, -1, self.heads, self.features_per_head)
 
         logits = torch.einsum("bshf,bzhf->bhsz", qry, key)
         if self.masked:
@@ -149,7 +149,7 @@ class CrossAttention(nn.Module):
             logits = logits - torch.triu(torch.ones(attend_to.size(1), attend_to.size(1))) * 1e12
         attention_map = torch.softmax(logits, 3)
 
-        out = torch.einsum("bhsz,bzhf->bshf", attention_map, val).view(batch, sequence, features)
+        out = torch.einsum("bhsz,bzhf->bshf", attention_map, val).reshape(batch, sequence, features)
         return self.to_out(out)  # Shape[Batch, Sequence, Features]
 
 
