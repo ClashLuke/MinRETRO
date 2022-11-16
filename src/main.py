@@ -5,6 +5,7 @@ import typing
 import pytorch_lightning
 import transformers
 import typer
+from pytorch_lightning.callbacks import ProgressBar
 from sentence_transformers import SentenceTransformer
 from smart_open import smart_open
 from torch.utils import data
@@ -46,6 +47,12 @@ class Dataset(data.Dataset):
         return len(self.data)
 
 
+class SplitProgreessBar(ProgressBar):
+    def on_train_epoch_end(self, *args, **kwargs):
+        super().on_train_epoch_end(*args, **kwargs)
+        print('')
+
+
 def main(embedding_model_name: str = "bert-large-uncased",
          encoder_features: int = 896, encoder_depth: int = 6, encoder_heads: int = 16,
          decoder_features: int = 896, decoder_depth: int = 12, decoder_heads: int = 16,
@@ -58,6 +65,7 @@ def main(embedding_model_name: str = "bert-large-uncased",
     """
     See https://arxiv.org/pdf/2112.04426.pdf#subsection.C.1 for official configurations
     :param embedding_model_name: Name of model (on HuggingFace Hub) to use for embeddings
+    :param tokenizer: Either path to local HuggingFace tokenizer or name of tokenizer from the HuggingFace Hub
     :param encoder_features: Width of the encoder's residual path
     :param encoder_depth: Number of blocks (FeedForward + Attention = 1 Block) in encoder
     :param encoder_heads: Number of attention heads used during encoder attention
@@ -103,7 +111,7 @@ def main(embedding_model_name: str = "bert-large-uncased",
     train_dataset = Dataset(train_dataset, sequence_length, tokenizer)
     train_dataloader = data.DataLoader(train_dataset, batch_size=batch_size)
 
-    trainer = pytorch_lightning.Trainer()
+    trainer = pytorch_lightning.Trainer(auto_select_gpus=True, callbacks=[SplitProgreessBar()])
     trainer.fit(retro, train_dataloader)
 
 
